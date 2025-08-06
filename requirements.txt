@@ -1,2 +1,5 @@
 streamlit
 feedparser
+requests
+beautifulsoup4
+pandas

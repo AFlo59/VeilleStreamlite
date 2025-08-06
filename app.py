@@ -5,6 +5,13 @@ import os
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
+from dotenv import load_dotenv
+load_dotenv()
+
+import os
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "INSÈRE_TA_CLÉ_ICI_TEMPORAIREMENT")
+
+
 
 # ---------- Config Streamlit ----------
 st.set_page_config(page_title="Veille IA", layout="wide")
@@ -24,32 +31,71 @@ def save_channels(channels):
         json.dump(channels, f, indent=4)
 
 # ---------- Fonction pour scraper Medium ----------
-def scrape_medium_articles(tag_url, keywords=None):
+def scrape_medium_articles(tag_url):
     """
-    Scrape les titres d'articles Medium depuis une URL de tag.
-    Filtre selon une liste de mots-clés (insensibles à la casse).
+    Scrape les titres + liens d'articles Medium depuis une URL de tag.
     """
     try:
         page = requests.get(tag_url, headers={"User-Agent": "Mozilla/5.0"})
         soup = BeautifulSoup(page.content, "html.parser")
-        articles = soup.find_all("h2")
 
-        filtered_articles = []
-
-        for a in articles:
-            title = a.get_text(strip=True)
-            if not title:
+        articles = []
+        for h2 in soup.find_all("h2"):
+            title = h2.get_text(strip=True)
+            link_tag = h2.find_parent("a")
+            if not title or not link_tag:
                 continue
-            if keywords:
-                if any(kw.lower() in title.lower() for kw in keywords):
-                    filtered_articles.append(title)
-            else:
-                filtered_articles.append(title)
+            link = link_tag["href"].split("?")[0]
+            if not link.startswith("http"):
+                link = "https://medium.com" + link
+            articles.append((title, link))
 
-        return filtered_articles
-
+        return articles
     except Exception as e:
-        return [f"Erreur : {e}"]
+        return [("Erreur", str(e))]
+
+
+
+def get_channel_id_from_url(url):
+    import re
+    try:
+        if "/channel/" in url:
+            return url.split("/channel/")[1].split("/")[0]
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers)
+        if res.status_code != 200:
+            return None
+        text = res.text
+        # Tentative extraction via channelId
+        match = re.search(r'"channelId"\s*:\s*"([^"]+)"', text)
+        if match:
+            return match.group(1)
+        # Tentative extraction via browseId
+        match2 = re.search(r'"browseId"\s*:\s*"([^"]+)"', text)
+        if match2:
+            return match2.group(1)
+        return None
+    except Exception:
+        return None
+
+def get_channel_id_from_api(query):
+    """
+    Recherche l'ID d'une chaîne YouTube via le nom ou handle en utilisant l'API YouTube.
+    """
+    api_key = os.getenv("YOUTUBE_API_KEY", "INSÈRE_TA_CLÉ_ICI_TEMPORAIREMENT")
+    if not api_key:
+        return None
+
+    search_url = (
+        f"https://www.googleapis.com/youtube/v3/search"
+        f"?part=snippet&type=channel&q={query}&key={api_key}"
+    )
+    response = requests.get(search_url)
+    if response.status_code == 200:
+        data = response.json()
+        if "items" in data and data["items"]:
+            return data["items"][0]["snippet"]["channelId"]
+    return None
 
 
 # ---------- Tabs principaux ----------
@@ -63,16 +109,29 @@ with tabs[0]:
 
     channels = load_channels()
 
-    # Ajouter une chaîne
     with st.expander("➕ Ajouter une chaîne YouTube"):
         name = st.text_input("Nom de la chaîne")
-        channel_id = st.text_input("Channel ID (YouTube)")
+        channel_url = st.text_input("URL de la chaîne YouTube (ex: https://www.youtube.com/@AllAboutAI)")
+
         if st.button("Ajouter"):
-            if name and channel_id:
-                channels[name] = channel_id
-                save_channels(channels)
-                st.success(f"Chaîne '{name}' ajoutée !")
-                st.rerun()
+            if name and channel_url:
+                # Essaye d'abord d'extraire via scraping
+                channel_id = get_channel_id_from_url(channel_url)
+                # Sinon, fallback via API
+                if not channel_id:
+                    query = channel_url.strip().split("/")[-1].replace("@", "")
+                    channel_id = get_channel_id_from_api(query)
+
+                if channel_id:
+                    channels[name] = channel_id
+                    save_channels(channels)
+                    st.success(f"Chaîne '{name}' ajoutée avec ID : {channel_id}")
+                    st.rerun()
+                else:
+                    st.error("Impossible de récupérer l'ID de la chaîne. Vérifie l'URL ou le nom.")
+            else:
+                st.warning("Merci de renseigner un nom et une URL valide.")
+
 
 
     # Supprimer une chaîne
@@ -115,25 +174,38 @@ with tabs[1]:
     default_keywords = ["NLP", "LLM", "language model", "transformer", "GPT", "chatbot", "token"]
 
     # Lien Medium à scraper
-    url = st.text_input("Lien Medium à scraper :", 
-                        "https://medium.com/tag/large-language-models")
+    st.write("Choisis une ou plusieurs sources Medium à scraper :")
 
-    # Personnalisation des mots-clés
-    keywords_input = st.text_input("Mots-clés à filtrer (séparés par des virgules)", 
-                                   ", ".join(default_keywords))
-    keywords = [k.strip() for k in keywords_input.split(",") if k.strip()]
+    medium_urls = {
+        "AI": "https://medium.com/tag/ai",
+        "Machine Learning": "https://medium.com/tag/machine-learning",
+        "Large Language Models": "https://medium.com/tag/large-language-models",
+        "NLP": "https://medium.com/tag/nlp",
+        "Deep Learning": "https://medium.com/tag/deep-learning",
+        "Generative AI": "https://medium.com/tag/generative-ai"
+    }
+
+    default_tags = ["AI", "Large Language Models"]
+    selected_tags = st.multiselect(
+    "Tags Medium à surveiller :",
+    options=list(medium_urls.keys()),
+    default=[tag for tag in default_tags if tag in medium_urls]
+    )
 
     if st.button("Scraper les articles Medium"):
-        articles = scrape_medium_articles(url, keywords)
         logs = []
-        if articles:
-            st.success(f"{len(articles)} article(s) trouvé(s) contenant les mots-clés.")
-            for a in articles:
-                st.markdown(f"### {a}")
-                logs.append({"source": "Medium", "title": a, "link": url})
+        for tag in selected_tags:
+            url = medium_urls[tag]
+            articles = scrape_medium_articles(url)  # Aucun filtrage
+            for title, link in articles:
+                st.markdown(f"### [{title}]({link})")
+                logs.append({"source": f"Medium - {tag}", "title": title, "link": link})
+        if logs:
+            st.success(f"{len(logs)} article(s) collecté(s) depuis Medium.")
             st.session_state['medium_logs'] = logs
         else:
-            st.warning("Aucun article trouvé avec les mots-clés spécifiés.")
+            st.warning("Aucun article récupéré.")
+
 
 
 # =========================================

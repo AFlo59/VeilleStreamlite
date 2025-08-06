@@ -1,5 +1,6 @@
-streamlit
-feedparser
+streamlit==1.29.0
 requests
+feedparser
 beautifulsoup4
 pandas
+python-dotenv
